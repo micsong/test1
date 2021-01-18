@@ -1,0 +1,590 @@
+'----------------------------------------------------------------------------------
+'--   Document   : VBScript
+'--   File Name  : monitor.vbs
+'--   Author     : Daniel Karlsson 
+'--   Revision   : A
+'--   Board 	 : 
+'--   Purpose    : Script for reading vaules from monitor block in FPGA (Xilinx XC5VLX110T-2FFG1136I)			
+'--	           and send data to a XML-file
+'--   Date       : 2010-05-19
+'--
+'--   Precondition: BSDL file from Xilinx must be updated with declaration of SYSMON_DR register:
+'--   attribute REGISTER_ACCESS of XC5VLX110T_FF1136 : entity is
+'--   "SYSMON_DR[32] (MONITOR_DRP)," &
+'--   The MONITOR_DRP instruction must be deleted from the INSTRUCTION_PRIVATE section in the BSDL file.
+'--   ScanWorks can not access private instructions.
+'--
+'--   For the rest, information is taken from "Virtex-5 FPGA System Monitor User Guide" UG192 v1.6
+'----------------------------------------------------------------------------------
+
+Dim SW
+Set SW = CreateObject("ScanWorks.API")
+Dim Design
+Set Design = SW.Design
+Dim UUT
+Set UUT = Design.UUT
+Dim Members
+Set Members = UUT.Members
+Dim Entity
+Set Entity = Members.Member("DUG")
+
+Dim D1003
+Set D1003 = Entity.Members.Member("D1003")
+
+'Buses
+Dim FPGA_CONTROL
+Set FPGA_CONTROL = Entity.Buses.Bus("FPGA_CONFIG_ctrl")
+Dim FPGA_OUT
+Set FPGA_OUT = Entity.Buses.Bus("FPGA_CONFIG_out")
+
+' Get the 'devices' and prepare variables for scanning
+Dim D3000
+Set D3000 = Entity.Members.Member("D3000")
+Dim D3000_Register      'The real register
+Dim D3000_TDI           'The local copy of TDI
+Dim D3000_TDO           'The local copy of TDO
+Dim D3000_Expected      'The local copy of Expected
+
+'For temporary store register readouts.
+Dim Value	
+
+'Set flag to indicate if miscompares were detected
+Public WithMiscompares
+WithMiscompares = 0             '0 is no fault
+
+'Define XML-file.
+Public strResultFile
+strResultFile = "c:\text.xml"
+
+'Create file and object
+Dim objFSO, objOrigFile
+Set objFSO = CreateObject("Scripting.FileSystemObject")
+Set objOrigFile = objFSO.CreateTextFile(strResultFile, True)
+
+
+'***************************MAIN PROGRAM***************************
+'******************************************************************
+  Initialize
+
+'****************Monitor Temperature***********
+  Value = ReadDRP(Temperature) 'Read address 00h (voltage)
+  Value = BINtoTemp(Value) 'Mask and translate to temperature
+  PrintResultToXML "Temp",Value
+  CheckLimits Value, TempHiLim, TempLoLim, "Temperature", "Deg"
+
+'****************Max Temp***********
+  Value = ReadDRP(MaxTemp) 
+  Value = BINtoTemp(Value) 'Mask and translate to temperature
+  PrintResultToXML "MaxTemp",Value
+  CheckLimits Value, TempHiLim, TempLoLim, "MaxTemp", "Deg"
+
+'****************Min Temp***********
+  Value = ReadDRP(MinTemp) 
+  Value = BINtoTemp(Value) 'Mask and translate to temperature
+  PrintResultToXML "MinTemp",Value
+  CheckLimits Value, TempHiLim, TempLoLim, "MinTemp", "Deg"
+
+'****************Monitor VCCint*************
+  Value = ReadDRP(VCCint) 'Read address 01h (voltage)
+  Value = BINtoSupplVolt(Value, 0, 1) 'Mask and translate to voltage. No Voltage divider
+  PrintResultToXML "VCCint",Value
+  CheckLimits Value, VCCHiLim, VCCLoLim, "VCCint", "V"
+
+  Value = ReadDRP(MaxVCCint) 'Read address 01h (voltage)
+  Value = BINtoSupplVolt(Value, 0, 1) 'Mask and translate to voltage. No Voltage divider
+  PrintResultToXML "MaxVCCint",Value
+  CheckLimits Value, VCCHiLim, VCCLoLim, "MaxVCCint", "V"
+
+  Value = ReadDRP(MinVCCint) 'Read address 01h (voltage)
+  Value = BINtoSupplVolt(Value, 0, 1) 'Mask and translate to voltage. No Voltage divider
+  PrintResultToXML "MinVCCint",Value
+  CheckLimits Value, VCCHiLim, VCCLoLim, "MaxVCCint", "V"
+
+'****************Monitor VCCaux*************
+  Value = ReadDRP(VCCaux) 'Read address 01h (voltage)
+  Value = BINtoSupplVolt(Value, 0, 1) 'Mask and translate to voltage. No Voltage divider
+'  Wscript.Echo "VCCaux voltage is: " + CStr(Value) + " V"
+  PrintResultToXML "VCCaux",Value
+  CheckLimits Value, VCCAuxHiLim, VCCAuxLoLim, "VCCaux", "V"
+
+  Value = ReadDRP(MaxVCCaux) 'Read address 01h (voltage)
+  Value = BINtoSupplVolt(Value, 0, 1) 'Mask and translate to voltage. No Voltage divider
+  PrintResultToXML "MaxVCCaux",Value
+  CheckLimits Value, VCCAuxHiLim, VCCAuxLoLim, "MaxVCCaux", "V"
+  
+  Value = ReadDRP(MinVCCaux) 'Read address 01h (voltage)
+  Value = BINtoSupplVolt(Value, 0, 1) 'Mask and translate to voltage. No Voltage divider
+  PrintResultToXML "MinVCCaux",Value
+  CheckLimits Value, VCCAuxHiLim, VCCAuxLoLim, "MinVCCaux", "V"
+
+
+'****************Monitor +12V @ Vaux8*************
+  Value = ReadDRP(Vaux8)
+  Value = BINtoVolt(Value, 10000, 680) 'Mask and translate to voltage. 10k over 680ohm voltage divider
+  PrintResultToXML "12V",Value
+  CheckLimits Value, Vaux8HiLim, Vaux8LoLim, "+12V", "V"
+
+'****************Monitor +1.2V @ Vaux7*************
+  Value = ReadDRP(Vaux7)
+  Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 10k over 1kOhm voltage divider
+  PrintResultToXML "6.5V",Value
+  CheckLimits Value, Vaux7HiLim, Vaux7LoLim, "+6.5V", "V"
+
+'****************Monitor +5V @ Vaux6*************
+  Value = ReadDRP(Vaux6)
+  Value = BINtoVolt(Value, 10000, 1000) 'Mask and translate to voltage. 10k over 1kOhm voltage divider
+  PrintResultToXML "5V",Value
+  CheckLimits Value, Vaux6HiLim, Vaux6LoLim, "+5V", "V"
+
+'****************Monitor +3.3V @ Vaux5*************
+  Value = ReadDRP(Vaux5)
+  Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 3k over 1kOhm voltage divider
+  PrintResultToXML "3.3V",Value
+  CheckLimits Value, Vaux5HiLim, Vaux5LoLim, "+3.3V", "V"
+
+'****************Monitor +2.5V @ Vaux4*************
+ Value = ReadDRP(Vaux4)
+ Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 3k over 1kOhm voltage divider
+ PrintResultToXML "2.5V",Value
+ CheckLimits Value, Vaux4HiLim, Vaux4LoLim, "+2.5V", "V"
+
+'****************Monitor +1.8V @ Vaux3*************
+  Value = ReadDRP(Vaux3)
+  Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 3k over 1kOhm voltage divider
+  PrintResultToXML "1.8V",Value
+  CheckLimits Value, Vaux3HiLim, Vaux3LoLim, "+1.8V", "V"
+
+'****************Monitor +1.2V_A @ Vaux2*************
+  Value = ReadDRP(Vaux2)
+  Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 3k over 1kOhm voltage divider
+  PrintResultToXML "1.2V_A",Value
+  CheckLimits Value, Vaux2HiLim, Vaux2LoLim, "+1.2V_A", "V"
+
+'****************Monitor +1.2V_B @ Vaux1*************
+  Value = ReadDRP(Vaux1)
+  Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 3k over 1kOhm voltage divider
+  PrintResultToXML "1.2V_B",Value
+  CheckLimits Value, Vaux1HiLim, Vaux1LoLim, "+1.2V_B", "V"
+
+'****************Monitor +1V @ Vaux0*************
+  Value = ReadDRP(Vaux0)
+  Value = BINtoVolt(Value, 3000, 1000) 'Mask and translate to voltage. 3k over 1kOhm voltage divider
+  PrintResultToXML "1V",Value
+  CheckLimits Value, Vaux0HiLim, Vaux0LoLim, "+1V", "V"
+
+  DeInitialize 'Reset and finish XML
+  Wscript.Quit (WithMiscompares)  'action only passes if value in brackets is zero
+'***************************************************************
+'*************************** END MAIN **************************
+
+Sub Initialize
+	UUT.ClearExpected (1)           'sc_clear (TRUE) ; clear expected buffers
+	UUT.Sticky = 0                  'sc_sticky (FALSE) ; make Expected last for 1 scan only
+	UUT.Compare = 1                 'sc_setCompareMode (TRUE) ; Turn Compare on
+
+        Entity.SetInstruction("BYPASS")
+        UUT.IRScan
+		
+	' Set devices in IDCODE, BYPASS, SAMPLE, EXTEST etc. SAMPLE is safe to set up values.
+        D1003.SetInstruction("SAMPLE")
+		
+		UUT.IRScan 'Set SAMPLE mode to be able to control FPGA_CONFIG signals.
+		'Control FPGACONFIG here
+		ApplyData FPGA_CONTROL, "111" 'Set as output.
+		ApplyData FPGA_OUT, "111" 'Drive signals high.
+		
+		D1003.SetInstruction("EXTEST")
+		SetInstructionRegister D3000, D3000_Register, "SYSMON_DR", "MONITOR_DRP"
+	UUT.IRScan
+	
+	WriteDRP(INIT_40)
+	WriteDRP(INIT_41)
+	WriteDRP(INIT_42)
+	WriteDRP(INIT_48)
+	WriteDRP(INIT_49)
+	WriteDRP(EnableVaux) 'Write 0001h to 02h (config register)
+	ReadDRP(CALIB) 'Dummy Read of 0x48 -> Calibration is performed. 
+	
+	InitXML
+End Sub
+
+Sub DeInitialize
+	UUT.Reset(1)
+	DeInitXML
+End Sub
+
+Function ReadDRP(DRPValue)
+	SetDataRegisterTDIBin D3000_TDI, D3000_Register, DRPValue
+	UUT.DRScan 'Scan in to DRP
+	'Wscript.Echo "DRPValus is: " + CStr(DRPValue)
+	UUT.DRScan 'Capture result of reading
+	Set D3000_TDO = D3000_Register.TDO
+	'Wscript.Echo "ReadDRP is: " + CStr(D3000_TDO.BinaryString)
+	ReadDRP = CStr(D3000_TDO.BinaryString)
+	'ReadDRP = "00000000000000010101011110000000"
+End Function
+
+Function ReadRawDRP(DRPValue)
+	SetDataRegisterTDIBin D3000_TDI, D3000_Register, DRPValue
+	UUT.DRScan 'Scan in to DRP
+	'Wscript.Echo "DRPValus is: " + CStr(DRPValue)
+	UUT.DRScan 'Capture result of reading
+	Set D3000_TDO = D3000_Register.TDO
+	Wscript.Echo "DRP register, raw data is: " + CStr(D3000_TDO.BinaryString)
+	'ReadRawDRP = D3000_TDO.BinaryString
+	ReadRawDRP = "00000000000000000000001110010100"
+End Function
+
+Function WriteDRP(wDRPValue)
+	SetDataRegisterTDIBin D3000_TDI, D3000_Register, wDRPValue
+	UUT.DRScan 'Scan in to DRP
+	'Wscript.Echo "DRPValus is: " + CStr(wDRPValue)
+End Function
+
+Sub InitXML
+	objOrigFile.WriteLine("<?xml version=" + Chr(34) + "1.0" + Chr(34) + " encoding=" + Chr(34) + "iso-8859-1" + Chr(34) + "?>")	
+	objOrigFile.WriteLine("<Measure>")
+End Sub
+
+Sub DeInitXML
+	objOrigFile.WriteLine("</Measure>")
+	objOrigFile.Close
+End Sub
+
+Sub PrintResultToXML(strTag,Value)
+	objOrigFile.WriteLine("   <Instrument>")
+	objOrigFile.WriteLine("      <Name>" + strTag + "</Name>")
+	objOrigFile.WriteLine("      <Result>" + CStr(Value) + "</Result>")
+	objOrigFile.WriteLine("   </Instrument>")
+End Sub
+
+Sub SetDataRegisterTDIBin(local_Register, device_Register, value)
+        Set local_Register = device_Register.TDI                'pass the TestRegister value to the Buffer
+        local_Register.BinaryString = value                             'set new values to scan in
+        device_Register.TDI = local_Register                    'pass the Buffer value back to the TestRegister
+End Sub
+
+Sub SetInstructionRegister(byRef device, byRef device_Register, register, instruction)
+	set device_Register	= device.TestRegisters.TestRegister(register)
+	device.SetInstruction(instruction) 
+End Sub
+
+'------------------------------------------------------------------------------
+' ApplyData - Set TDI values and do a scan. Mimics macros "apply data" statement
+'------------------------------------------------------------------------------
+Sub ApplyData(bus1, value1)
+  Dim buffer1
+  
+  ' Set TDI value for bus #1
+  Set buffer1 = bus1.TDI
+  buffer1.BinaryString = value1
+  bus1.TDI = buffer1
+    ' Scan the data in
+  UUT.DRScan
+End Sub
+
+Sub Delay(seconds)
+        Go = Timer + seconds
+        Do Until Timer > Go
+        Loop
+End Sub
+
+'Not working, damnit!
+Function DRP2Temperature(dtc)
+    Dim a, b, c
+    a = CInt(dtc)
+    a = Mid(a,22,8)*1
+    Wscript.Echo "Temperaturen är: " + CStr(a) + " grader"
+    b = a * 503.975
+    Wscript.Echo "Temperaturen är: " + CStr(b) + " grader"
+    c = b / 1024
+    Wscript.Echo "Temperaturen är: " + CStr(c) + " grader"
+    DRP2Temperature = c - 273.15
+    Wscript.Echo "Temperaturen är: " + CStr(DRP2Temperature) + " grader"
+End Function    
+    
+Function GetSupSensOffset
+    Dim offset, tmp, a, b, c, d, e, f, g, h, i, j
+	tmp = ReadRawDRP(SupOffset) 'Raw read of 08H register
+	'Wscript.Echo "Register contents is: " + CStr(tmp)
+
+	'Wscript.Echo "Absolute Value is: " + CStr(tmp)
+	
+	a = Mid(tmp,26,1)*1
+   	b = Mid(tmp,25,1)*2
+	c = Mid(tmp,24,1)*4
+   	d = Mid(tmp,23,1)*8
+	e = Mid(tmp,22,1)*16
+   	f = Mid(tmp,21,1)*32
+	g = Mid(tmp,20,1)*64
+   	h = Mid(tmp,19,1)*128
+   	i = Mid(tmp,18,1)*256
+   	j = Mid(tmp,17,1)*512
+
+	Wscript.Echo "a is: " + CStr(a)
+	Wscript.Echo "b is: " + CStr(b)
+	Wscript.Echo "c is: " + CStr(c)
+	Wscript.Echo "d is: " + CStr(d)
+	Wscript.Echo "e is: " + CStr(e)
+	Wscript.Echo "f is: " + CStr(f)
+	Wscript.Echo "g is: " + CStr(g)
+	Wscript.Echo "h is: " + CStr(h)
+	Wscript.Echo "i is: " + CStr(i)
+	Wscript.Echo "j is: " + CStr(j)
+	GetSupSensOffset = (a+b+c+d+e+f+g+h+i+j)
+	
+	If GetSupSensOffset >= 512 Then 'lousy impl. of two complement, dont try this at home kids...
+		GetSupSensOffset = GetSupSensOffset - 1024
+		GetSupSensOffset = GetSupSensOffset +1
+	End If
+		
+	GetSupSensOffset = GetSupSensOffset * 0.003  '3mV per LSB
+
+	Wscript.Echo "Supply Sensor Offset is: " + CStr(GetSupSensOffset) + " V"
+End Function    
+
+Function GetADCOffset
+    Dim offset, tmp, a, b, c, d, e, f, g, h, i, j
+	tmp = ReadRawDRP(ADCOffset) 'Raw read of 09H register
+	'Wscript.Echo "Register contents is: " + CStr(tmp)
+
+	'Wscript.Echo "Absolute Value is: " + CStr(tmp)
+	
+	a = Mid(tmp,26,1)*1
+   	b = Mid(tmp,25,1)*2
+	c = Mid(tmp,24,1)*4
+   	d = Mid(tmp,23,1)*8
+	e = Mid(tmp,22,1)*16
+   	f = Mid(tmp,21,1)*32
+	g = Mid(tmp,20,1)*64
+   	h = Mid(tmp,19,1)*128
+   	i = Mid(tmp,18,1)*256
+   	j = Mid(tmp,17,1)*512
+
+	GetADCOffset = (a+b+c+d+e+f+g+h+i+j)
+
+	If GetADCOffset >= 512 Then 'lousy impl. of two complement, dont try this at home kids...
+		GetADCOffset = GetADCOffset - 1024
+		GetADCOffset = GetADCOffset +1
+	End If
+	
+	GetADCOffset = GetADCOffset * 0.001  '1mV per LSB
+
+'	If neg == 1 Then
+'		GetSupSensOffset = -GetSupSensOffset
+'	End If
+	Wscript.Echo "ADCOffset Offset is: " + CStr(GetADCOffset) + " V"
+End Function
+
+Function GetGainError
+    Dim offset, tmp, sign, a, b, c, d, e
+	sign = 0
+	tmp = ReadRawDRP(GainError) 'Raw read of 09H register
+	'Wscript.Echo "Register contents is: " + CStr(tmp)
+	
+	'Wscript.Echo "Absolute Value is: " + CStr(tmp)
+	
+	a = Mid(tmp,32,1)*1
+   	b = Mid(tmp,31,1)*2
+	c = Mid(tmp,30,1)*4
+   	d = Mid(tmp,29,1)*8
+	e = Mid(tmp,28,1)*16
+	sign = Mid(tmp,27,1)
+	'Wscript.Echo "Sign of GainError is: " + CStr(Sign)
+
+	GetGainError = (a+b+c+d+e)*0.002  '0.2% per LSB
+
+
+	If sign > 0 Then		'Six´th bit inicates pos or neg correctionfactor
+	  GetGainError = 1 - GetGainError
+	Else
+	  GetGainError = 1 + GetGainError
+	End If
+
+	Wscript.Echo "GainError correctionfactor is: " + CStr(GetGainError) + " %"
+End Function
+
+
+Function BINtoTemp(dtc)
+   Dim a, b, c, d, e, f, g, h, i, j
+	a = Mid(dtc,26,1)*0.4921630859375
+   	b = Mid(dtc,25,1)*0.984326171875
+	c = Mid(dtc,24,1)*1.96865234375
+   	d = Mid(dtc,23,1)*3.9373046875
+	e = Mid(dtc,22,1)*7.874609375
+   	f = Mid(dtc,21,1)*15.74921875
+	g = Mid(dtc,20,1)*31.4984375
+   	h = Mid(dtc,19,1)*62.996875
+   	i = Mid(dtc,18,1)*125.99375
+   	j = Mid(dtc,17,1)*251.9875
+   	   	
+	BINtoTemp = a+b+c+d+e+f+g+h+i+j-273.15
+End Function    
+ 
+'    * Voltage
+'    |
+'    |
+'   | | R1
+'   | |
+'    |
+'    |
+'    * AUXVoltage
+'    |
+'    |
+'   | | R2
+'   | |
+'    |
+'    |
+'    * GND  
+      
+Function BINtoSupplVolt(dvc, R1, R2)
+   Dim a, b, c, d, e, f, g, h, i, j
+	a = Mid(dvc,26,1)*0.0009765625
+   	b = Mid(dvc,25,1)*0.001953125
+	c = Mid(dvc,24,1)*0.00390625
+  	d = Mid(dvc,23,1)*0.0078125
+	e = Mid(dvc,22,1)*0.015625
+  	f = Mid(dvc,21,1)*0.03125
+	g = Mid(dvc,20,1)*0.0625
+   	h = Mid(dvc,19,1)*0.125
+   	i = Mid(dvc,18,1)*0.25
+   	j = Mid(dvc,17,1)*0.5
+   	
+	BINtoSupplVolt = a+b+c+d+e+f+g+h+i+j
+	'Care for voltage divider
+	BINtoSupplVolt = (BINtoSupplVolt/R2)*(R1+R2)
+	'Add attenuation
+	BINtoSupplVolt = BINtoSupplVolt*3
+			
+End Function    
+
+Function BINtoVolt(dvc, R1, R2)
+   Dim a, b, c, d, e, f, g, h, i, j
+	a = Mid(dvc,26,1)*0.0009765625
+   	b = Mid(dvc,25,1)*0.001953125
+	c = Mid(dvc,24,1)*0.00390625
+  	d = Mid(dvc,23,1)*0.0078125
+	e = Mid(dvc,22,1)*0.015625
+  	f = Mid(dvc,21,1)*0.03125
+	g = Mid(dvc,20,1)*0.0625
+   	h = Mid(dvc,19,1)*0.125
+   	i = Mid(dvc,18,1)*0.25
+   	j = Mid(dvc,17,1)*0.5
+   	
+	BINtoVolt = a+b+c+d+e+f+g+h+i+j
+	'Care for voltage divider
+	BINtoVolt = (BINtoVolt/R2)*(R1+R2)
+End Function    
+
+Sub CheckLimits(meas, hi, lo, message, sort)
+	Dim a
+	If meas >= hi Then
+		WScript.Echo "!!!! WARNING: " + message + " is over limit: > " + CStr(hi) + " !!!!"
+		WScript.Echo "!!!! " + message + " is: " + CStr(meas) + " " + sort + " !!!!"
+		WScript.Echo ""
+		WithMiscompares = 1
+	ElseIf meas <= lo Then
+		WScript.Echo "!!!! WARNING: " + message + " is under limit: > " + CStr(lo) + " !!!!"
+		WScript.Echo "!!!! " + message + " is: " + CStr(meas) + " " + sort + "!!!!"
+		WScript.Echo ""
+		WithMiscompares = 1
+	else
+		a = Mid(meas,1,5)
+		WScript.Echo message + " is: " + CStr(a) + " " + sort + "  PASS!"
+		WScript.Echo ""
+	end if
+End Sub
+
+
+Const IR = 0
+Const DR = 1
+Const TestLogicReset = 0
+Const RunTestIdle = 1
+Const SelectDRScan = 2
+Const SelectIRScan = 3
+Const CaptureDR = 4
+Const CaptureIR = 5
+Const ShiftDR = 6
+Const ShiftIR = 7
+Const Exit1DR = 8
+Const Exit1IR = 9
+Const PauseDR = 10
+Const PauseIR = 11
+Const Exit2DR = 12
+Const Exit2IR = 13
+Const TestModeSelect = 14
+
+'SYSMON_DR register
+'--------------------------------------------------
+'|31|30|29    26|25            16|15             0|
+'| x| x|CMD[3:0]|DRP Address[9:0]|DRP Data[15:0]  |
+'--------------------------------------------------
+
+Const EnableVaux  = "00001000000000100000000000000001" 'Write 0001h to 02h
+Const SeqEnableVaux= "00001000010010011111111111111111" 'Write FFFFh to 49h
+Const Temperature = "00000100000000000000000000000000"
+Const VCCint      = "00000100000000010000000000000000"
+Const VCCaux      = "00000100000000100000000000000000"
+Const VpVn        = "00000100000000110000000000000000"
+Const Vrefp       = "00000100000001000000000000000000"
+Const Vrefn       = "00000100000001010000000000000000"
+Const SupOffset   = "00000100000010000000000000000000"
+Const ADCOffset   = "00000100000010010000000000000000"
+Const GainError   = "00000100000010100000000000000000"
+Const Vaux0       = "00000100000100000000000000000000" '+1V
+Const Vaux1       = "00000100000100010000000000000000"'+1,2V_B
+Const Vaux2       = "00000100000100100000000000000000"'+1,2V_A
+Const Vaux3       = "00000100000100110000000000000000" '+1,8V
+Const Vaux4       = "00000100000101000000000000000000" '+2,5V
+Const Vaux5       = "00000100000101010000000000000000" '+3,3V
+Const Vaux6       = "00000100000101100000000000000000" '+5V
+Const Vaux7       = "00000100000101110000000000000000" '+6,5V
+Const Vaux8       = "00000100000110000000000000000000" '+12V
+Const Vaux9       = "00000100000110010000000000000000"
+Const Vaux10      = "00000100000110100000000000000000"
+Const Vaux11      = "00000100000110110000000000000000"
+Const Vaux12      = "00000100000111000000000000000000"
+Const Vaux13      = "00000100000111010000000000000000" 
+Const Vaux14      = "00000100000111100000000000000000" 
+Const Vaux15      = "00000100000111110000000000000000" 
+Const MaxTemp     = "00000100001000000000000000000000"
+Const MaxVCCint   = "00000100001000010000000000000000"
+Const MaxVCCaux   = "00000100001000100000000000000000"
+Const MinTemp     = "00000100001001000000000000000000"
+Const MinVCCint   = "00000100001001010000000000000000"
+Const MinVCCaux   = "00000100001001100000000000000000"
+Const NoAction    = "00000000000000000000000000000000"
+Const XOR_const   = "11111111111111111111111111111111"
+
+Const INIT_40     = "00001000010000000001000000000000" '0x1000 Set averaging to 16
+Const INIT_41     = "00001000010000010010000010100111" '0x20A7 Enable AutoChannelSequence. ADC and sensor calibration enabled.
+Const INIT_42     = "00001000010000100000101000000000" '0x0A00 
+Const INIT_48     = "00001000010010000000010000000001" '0x0401
+Const INIT_49     = "00001000010010010000000111111111" '0x0000 Enable AuxChannels in mux (aux0-aux8)
+Const CALIB		  = "00000100010010000000010000000001" 'Read 0x08 -> calibraton is performed.
+
+Const TempLoLim = 20
+Const TempHiLim = 60
+Const VCCLoLim = 0.97
+Const VCCHiLim = 1.03
+Const VCCAuxLoLim = 2.42
+Const VCCAuxHiLim = 2.58
+Const Vaux8LoLim = 11.400
+Const Vaux8HiLim = 12.600
+Const Vaux7LoLim = 1.1640
+Const Vaux7HiLim = 1.2600 
+Const Vaux6LoLim = 4.7500
+Const Vaux6HiLim = 5.2500
+Const Vaux5LoLim = 3.1823
+Const Vaux5HiLim = 3.4133
+Const Vaux4LoLim = 1.1640
+Const Vaux4HiLim = 1.2600
+Const Vaux3LoLim = 1.7100
+Const Vaux3HiLim = 1.8900
+Const Vaux2LoLim = 1.1640
+Const Vaux2HiLim = 1.2600
+Const Vaux1LoLim = 1.1640
+Const Vaux1HiLim = 1.2600
+Const Vaux0LoLim = 0.9700
+Const Vaux0HiLim = 1.0300
+
